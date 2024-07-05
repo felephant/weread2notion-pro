@@ -1,11 +1,11 @@
 import argparse
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import os
 import time
 
 import pendulum
+from retrying import retry
 
 from notion_helper import NotionHelper
 from weread_api import WeReadApi
@@ -18,7 +18,6 @@ from utils import (
     get_title,
     get_embed,
 )
-
 
 def insert_to_notion(page_id, timestamp, duration):
     parent = {"database_id": notion_helper.day_database_id, "type": "database_id"}
@@ -56,7 +55,7 @@ def insert_to_notion(page_id, timestamp, duration):
             ]
         ),
     }
-    if page_id != None:
+    if page_id is not None:
         notion_helper.client.pages.update(page_id=page_id, properties=properties)
     else:
         notion_helper.client.pages.create(
@@ -65,7 +64,6 @@ def insert_to_notion(page_id, timestamp, duration):
             properties=properties,
         )
 
-
 def get_file():
     # 设置文件夹路径
     folder_path = "./OUT_FOLDER"
@@ -73,7 +71,6 @@ def get_file():
     # 检查文件夹是否存在
     if os.path.exists(folder_path) and os.path.isdir(folder_path):
         entries = os.listdir(folder_path)
-
         file_name = entries[0] if entries else None
         return file_name
     else:
@@ -81,6 +78,11 @@ def get_file():
         return None
 
 HEATMAP_GUIDE = "https://mp.weixin.qq.com/s?__biz=MzI1OTcxOTI4NA==&mid=2247484145&idx=1&sn=81752852420b9153fc292b7873217651&chksm=ea75ebeadd0262fc65df100370d3f983ba2e52e2fcde2deb1ed49343fbb10645a77570656728&token=157143379&lang=zh_CN#rd"
+
+@retry(stop_max_attempt_number=3, wait_fixed=2000)
+def query_all_with_retry(notion_helper, database_id):
+    return notion_helper.query_all(database_id=database_id)
+
 if __name__ == "__main__":
     notion_helper = NotionHelper()
     weread_api = WeReadApi()
@@ -96,6 +98,7 @@ if __name__ == "__main__":
             print(f"更新热力图失败，没有添加热力图占位。具体参考：{HEATMAP_GUIDE}")
     else:
         print(f"更新热力图失败，没有生成热力图。具体参考：{HEATMAP_GUIDE}")
+
     api_data = weread_api.get_api_data()
     readTimes = {int(key): value for key, value in api_data.get("readTimes").items()}
     now = pendulum.now("Asia/Shanghai").start_of("day")
@@ -103,14 +106,18 @@ if __name__ == "__main__":
     if today_timestamp not in readTimes:
         readTimes[today_timestamp] = 0
     readTimes = dict(sorted(readTimes.items()))
-    results = notion_helper.query_all(database_id=notion_helper.day_database_id)
-    for result in results:
-        timestamp = result.get("properties").get("时间戳").get("number")
-        duration = result.get("properties").get("时长").get("number")
-        id = result.get("id")
-        if timestamp in readTimes:
-            value = readTimes.pop(timestamp)
-            if value != duration:
-                insert_to_notion(page_id=id, timestamp=timestamp, duration=value)
-    for key, value in readTimes.items():
-        insert_to_notion(None, int(key), value)
+
+    try:
+        results = query_all_with_retry(notion_helper, notion_helper.day_database_id)
+        for result in results:
+            timestamp = result.get("properties").get("时间戳").get("number")
+            duration = result.get("properties").get("时长").get("number")
+            id = result.get("id")
+            if timestamp in readTimes:
+                value = readTimes.pop(timestamp)
+                if value != duration:
+                    insert_to_notion(page_id=id, timestamp=timestamp, duration=value)
+        for key, value in readTimes.items():
+            insert_to_notion(None, int(key), value)
+    except Exception as e:
+        print(f"Error querying Notion database: {e}")
