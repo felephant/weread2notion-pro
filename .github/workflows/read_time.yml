@@ -69,4 +69,3 @@ jobs:
       - name: read time sync
         run: |
           python -u scripts/read_time.py
-      
